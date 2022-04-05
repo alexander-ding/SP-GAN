@@ -1,5 +1,7 @@
 # encoding=utf-8
 
+from torch.nn import AvgPool2d, Conv1d, Conv2d, Embedding, LeakyReLU, Module
+from Generation.modules import *
 import numpy as np
 import math
 import sys
@@ -15,12 +17,12 @@ import torch.nn.functional as F
 # add for shape-preserving Loss
 from collections import namedtuple
 # from pointnet2.pointnet2_modules import PointNet2SAModule, PointNet2SAModuleMSG
-cudnn.benchnark=True
-from Generation.modules import *
-from torch.nn import AvgPool2d, Conv1d, Conv2d, Embedding, LeakyReLU, Module
+cudnn.benchnark = True
 
 neg = 0.01
 neg_2 = 0.2
+
+
 class AdaptivePointNorm(nn.Module):
     def __init__(self, in_channel, style_dim, use_eql=False):
         super().__init__()
@@ -44,10 +46,12 @@ class AdaptivePointNorm(nn.Module):
 
         return out
 
+
 class EdgeBlock(nn.Module):
     """ Edge Convolution using 1x1 Conv h
     [B, Fin, N] -> [B, Fout, N]
     """
+
     def __init__(self, Fin, Fout, k, attn=True):
         super(EdgeBlock, self).__init__()
         self.k = k
@@ -63,18 +67,18 @@ class EdgeBlock(nn.Module):
         )
 
         self.conv_x = nn.Sequential(
-            nn.Conv2d(2 * Fin, Fout, [1, 1], [1, 1]),  # Fin, Fout, kernel_size, stride
+            # Fin, Fout, kernel_size, stride
+            nn.Conv2d(2 * Fin, Fout, [1, 1], [1, 1]),
             nn.BatchNorm2d(Fout),
             nn.LeakyReLU(neg, inplace=True)
         )
 
-        self.conv_out = nn.Conv2d(Fout, Fout, [1, k], [1, 1])  # Fin, Fout, kernel_size, stride
-
-
+        # Fin, Fout, kernel_size, stride
+        self.conv_out = nn.Conv2d(Fout, Fout, [1, k], [1, 1])
 
     def forward(self, x):
         B, C, N = x.shape
-        x = get_edge_features(x, self.k) # [B, 2Fin, N, k]
+        x = get_edge_features(x, self.k)  # [B, 2Fin, N, k]
         w = self.conv_w(x[:, C:, :, :])
         w = F.softmax(w, dim=-1)  # [B, Fout, N, k] -> [B, Fout, N, k]
 
@@ -106,10 +110,10 @@ class Generator(nn.Module):
         dim = 128
         self.head = nn.Sequential(
             Conv(3 + self.nz, dim, 1),
-            #nn.BatchNorm1d(dim),
+            # nn.BatchNorm1d(dim),
             nn.LeakyReLU(neg, inplace=True),
             Conv(dim, dim, 1),
-            #nn.BatchNorm1d(dim),
+            # nn.BatchNorm1d(dim),
             nn.LeakyReLU(neg, inplace=True),
         )
 
@@ -124,7 +128,6 @@ class Generator(nn.Module):
             nn.BatchNorm1d(512),
             nn.LeakyReLU(neg, inplace=True),
         )
-
 
         self.tail = nn.Sequential(
             Conv1d(512+dim, 256, 1),
@@ -155,11 +158,9 @@ class Generator(nn.Module):
         self.lrelu1 = nn.LeakyReLU(neg_2)
         self.lrelu2 = nn.LeakyReLU(neg_2)
 
-
-
     def forward(self, x, z):
-
-        B,N,_ = x.size()
+        z = torch.tile(z, (1, self.opts.np, 1))
+        B, N, _ = x.size()
         if self.opts.z_norm:
             z = z / (z.norm(p=2, dim=-1, keepdim=True)+1e-8)
 
@@ -179,7 +180,6 @@ class Generator(nn.Module):
         x2 = self.lrelu2(x2)
         x2 = self.adain2(x2, style)
 
-
         feat_global = torch.max(x2, 2, keepdim=True)[0]
         feat_global = feat_global.view(B, -1)
         feat_global = self.global_conv(feat_global)
@@ -197,13 +197,14 @@ class Generator(nn.Module):
 
         return x1_p
 
-    def interpolate(self, x, z1, z2, selection, alpha, use_latent = False):
+    def interpolate(self, x, z1, z2, selection, alpha, use_latent=False):
 
         if not use_latent:
 
-            ## interpolation
+            # interpolation
             z = z1
-            z[:, selection == 1] = z1[:, selection == 1] * (1 - alpha) + z2[:, selection == 1] * (alpha)
+            z[:, selection == 1] = z1[:, selection == 1] * \
+                (1 - alpha) + z2[:, selection == 1] * (alpha)
 
             B, N, _ = x.size()
             if self.opts.z_norm:
@@ -229,7 +230,8 @@ class Generator(nn.Module):
             style_2 = self.head(style_2)  # B,C,N
 
             style = style_1
-            style[:, :, selection == 1] = style_1[:, :, selection == 1] * (1 - alpha) + style_2[:, :, selection == 1] * alpha
+            style[:, :, selection == 1] = style_1[:, :, selection == 1] * \
+                (1 - alpha) + style_2[:, :, selection == 1] * alpha
 
         pc = x.transpose(2, 1).contiguous()
         if self.use_head:
@@ -259,6 +261,3 @@ class Generator(nn.Module):
         x1_p = pc + x1_o if self.off else x1_o
 
         return x1_p
-
-
-

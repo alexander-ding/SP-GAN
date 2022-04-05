@@ -51,10 +51,24 @@ def pc_normalize(pc):
     pc = pc / m
     return pc
 
+class FiLMNetwork(nn.Module):
+    
+    def __init__(self, in_sz, out_sz):
+        super(FiLMNetwork, self).__init__()
+        
+        self.f = nn.Linear(in_sz, out_sz)
+        self.h = nn.Linear(in_sz, out_sz)
+
+    def forward(self, inputs, features):
+        gamma = self.f(inputs).unsqueeze(1)
+        beta = self.h(inputs).unsqueeze(1)
+
+        return features * gamma + beta
+
 class Model(object):
     def __init__(self, opts):
         self.opts = opts
-
+        self.z_changer = FilMNetwork(16, self.opts.nz)
 
     def backup(self):
         if self.opts.phase == 'train':
