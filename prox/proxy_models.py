@@ -49,30 +49,35 @@ class LossProxy(nn.Module):
 
         dropout = 0.2
 
-        self.encoder = pc_encoder.PCEncoder(beta_sz=18)
+        self.encoder = pc_encoder.HyperNetwork(beta_sz=16 + 2)
 
         self.linear1 = nn.Linear(reshape_sz, 1)
 
         self.loss_network = nn.Sequential(self.linear1, nn.Flatten(0))
 
         self.mean = mean
-        self.val = std
+        self.std = std
 
     def predict(self, inputs, betas):
 
         encoding = self.encoder(inputs, betas)
         return self.loss_network(encoding)
 
-    def forward(self, inputs, betas, is_pcd):
-        if not is_pcd:
-            v, f = get_vf(inputs)
-            pts = sample_mesh_surface(v.unsqueeze(0), f)
+    def forward(self, chairs, betas, is_pcd):
 
-        return self.predict(inputs, betas).flatten()
+        pts_chair = []
+        if not is_pcd:
+            for chair in chairs:
+                v, f = get_vf(chair)
+                p = sample_mesh_surface(v.unsqueeze(0), f).squeeze(0)
+                pts_chair.append(p)
+            chairs = torch.stack(pts_chair)
+
+        return self.predict(chairs, betas).flatten()
 
     def loss(self, pred, labels):
 
-        labels = (labels - self.mean) / self.val
+        labels = (labels - self.mean) / self.std
         loss = 0.0
         loss += (pred - labels).abs().sum()
 
@@ -80,7 +85,7 @@ class LossProxy(nn.Module):
 
     def contrastive(self, pred, labels):
 
-        labels = (labels - self.mean) / self.val
+        labels = (labels - self.mean) / self.std
         num_choices = max(len(pred), 5000)
         choices = np.random.choice(len(pred), (2 * num_choices))
 
@@ -142,8 +147,8 @@ class PoseProxy(nn.Module):
         )
 
         pts = torch.cat((chairs, pose), dim=1)
-        val = self.predict(pts).flatten()
-        return val 
+
+        return self.predict(pts).flatten()
 
     def loss(self, pred, labels):
 

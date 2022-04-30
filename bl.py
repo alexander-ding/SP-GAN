@@ -681,11 +681,3 @@ def get_vf(cubes):
             faces =  torch.cat((faces, (f + verts.shape[0])))
             verts = torch.cat((verts, v))
     return verts.to(device),faces.to(device)
-
-if __name__ == "__main__":
-
-    model = make_model()
-    faces = torch.tensor(model.faces.astype(np.long))
-    vertices = model(return_vertices=True).vertices[0]
-
-    utils.writeObj(vertices,faces,"mod.obj")

@@ -20,18 +20,14 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from common import POSE_DIM, get_pose_batch, encode_poses
+from pc_encoder import HyperNetwork
 from prox.proxy_models import get_pose_loss
 from tensorboardX import SummaryWriter
 from torch.autograd import Variable
 from tqdm import tqdm
 
 from Generation.Generator import Generator
-from Generation.point_operation import (
-    plot_pcd_multi_rows,
-    plot_pcd_multi_rows_color,
-    plot_pcd_multi_rows_single_color,
-    plot_pcd_three_views_color,
-)
 
 cudnn.benchnark = True
 
@@ -58,75 +54,7 @@ class AverageValueMeter(object):
         self.avg = self.sum / self.count
 
 
-# seed = 123
-# seed = 2021
-seed = 1990
-random.seed(seed)
-np.random.seed(seed)
-torch.manual_seed(seed)
-
-DATA_DIR = Path("/mnt/hdd1/chairs/")
-SAVE_DIR = DATA_DIR / "spgan-pose"
-
-pca = joblib.load("pose_pca.joblib")
-
-
-def encode_poses(poses):
-    return pca.transform(poses)
-
-
-def decode_poses(poses):
-    return pca.inverse_transform(poses)
-
-
-POSE_DIM = pca.n_components_
-
-clustering, clustering_inv = torch.load("clustered_poses.pt")
-files = [DATA_DIR / "poses" / str(i) / "default.pt" for i in range(10000)]
-
-
-def get_pose_batch(batch_size=1, cluster=-1):
-    bd_samples = "body_pts"
-
-    fs = []
-    for i in range(batch_size):
-        # Pick Cluster
-        r = cluster if cluster != -1 else np.random.randint(len(clustering))
-        b = clustering[r]
-        # Pick index
-        i = np.random.choice(len(b))
-        x = b[i]
-        """
-        x = np.random.choice(list(clustering_inv.keys()))"""
-        # File
-        f = files[x]
-        fs.append(f)
-
-    pose_vecs = []
-    pose_pts = []
-    for f in fs:
-        name = str(f).split("/")[-2]
-        pose_vec = torch.load(f)["pose"]
-
-        n = DATA_DIR / bd_samples / f"{name}.gz"
-        f = gzip.GzipFile(n, "r")
-        pose_points = np.load(f)
-
-        if not torch.is_tensor(pose_vec):
-            pose_vec = torch.tensor(pose_vec)
-        if not torch.is_tensor(pose_points):
-            pose_points = torch.tensor(pose_points)
-
-        pose_vecs.append(pose_vec)
-        pose_pts.append(pose_points)
-
-    pose_vecs = torch.stack(pose_vecs).float()
-    pose_points = torch.stack(pose_pts).float()
-    pose_encs = torch.tensor(
-        encode_poses(pose_vecs.numpy().reshape(batch_size, -1))
-    ).float()
-
-    return pose_vecs, pose_encs, pose_points
+SAVE_DIR = Path("/mnt/hdd1/chairs/spgan-pose/")
 
 
 def pc_normalize(pc, return_len=False):
@@ -140,114 +68,17 @@ def pc_normalize(pc, return_len=False):
     return pc
 
 
-plot_folder = "models/plots"
-if not os.path.exists(plot_folder):
-    os.makedirs(plot_folder)
-
-class HyperNetworkLayer(nn.Module):
-    def __init__(self, cdim, fdim, gain=1.0):
-        super(HyperNetworkLayer, self).__init__()
-
-        self.fdim = fdim
-        self.W_net = nn.Linear(cdim, fdim * fdim, bias=False)
-
-        std = gain / (cdim * fdim) ** 0.5
-        nn.init.normal_(self.W_net.weight, std=std)
-
-        self.b_net = nn.Linear(cdim, fdim, bias=False)
-        nn.init.normal_(self.b_net.weight, std=std)
-
-    def forward(self, c, x):
-        c = c.view(len(c), -1)
-        W = self.W_net(c).view(len(x), self.fdim, self.fdim)
-        b = self.b_net(c).unsqueeze(1)
-        x_out = torch.bmm(x, W) + b
-        return x_out
-
-
-class HyperNetwork(nn.Module):
-    def __init__(self, cdim, fdim):
-        super(HyperNetwork, self).__init__()
-
-        gain = 1  # nn.init.calculate_gain('tanh')
-        self.l1 = HyperNetworkLayer(cdim, fdim, gain=gain)
-        self.l2 = HyperNetworkLayer(cdim, fdim, gain=gain)
-        self.l3 = HyperNetworkLayer(cdim, fdim)
-        self.batch_norm = nn.BatchNorm1d(fdim)
-        self.activation = nn.ReLU()
-
-    def forward(self, c, x, is_train=False):
-        x = self.l1(c, x)
-        if is_train:
-            x = self.batch_norm(x)
-        x = self.activation(x)
-        x = self.l2(c, x)
-        if is_train:
-            x = self.batch_norm(x)
-        x = self.activation(x)
-        x = self.l3(c, x)
-        return x
-
-
-# Multi-layer FiLM Network
-class MLP_FiLM(nn.Module):
-    def __init__(self, cdim, fdim):
-        super(MLP_FiLM, self).__init__()
-
-        self.film = nn.ModuleList()
-
-        self.film.append(LayerFiLM(cdim, fdim, fdim))
-        self.film.append(LayerFiLM(cdim, fdim, fdim))
-        self.film.append(LayerFiLM(cdim, fdim, fdim))
-
-    def forward(self, c, x, is_train=False):
-        for f in self.film:
-            x = f(c, x)
-        return x
-
-
-class LayerFiLM(nn.Module):
-    def __init__(self, c_sz, f_sz, out_sz):
-        super(LayerFiLM, self).__init__()
-        gain = nn.init.calculate_gain("tanh")
-        self.l = HyperNetworkLayer(c_sz, out_sz, gain=gain)
-        # self.l = nn.Linear(f_sz, out_sz)
-        # nn.init.xavier_normal_(self.l.weight,gain=nn.init.calculate_gain('tanh'))
-        self.f = FiLMNetwork(c_sz, out_sz)
-
-    def forward(self, inputs, features):
-
-        features = self.l(inputs, features).tanh()
-        return self.f(inputs, features)
-
-
-class FiLMNetwork(nn.Module):
-    def __init__(self, in_sz, out_sz):
-        super(FiLMNetwork, self).__init__()
-
-        self.f = nn.Linear(in_sz, out_sz)
-        nn.init.xavier_normal_(self.f.weight)
-        self.h = nn.Linear(in_sz, out_sz)
-        nn.init.xavier_normal_(self.h.weight)
-
-    def forward(self, inputs, features):
-        reshape = [len(features)] + [1] * (len(features.shape) - 2) + [-1]
-
-        gamma = self.f(inputs).view(reshape)
-        beta = self.h(inputs).view(reshape)
-
-        return features * gamma + beta
-
-
 def transform_chair_pc(x):
     x = x.transpose(2, 1)
     centroid = torch.mean(x, dim=1, keepdims=True)
     x = x - centroid
     furthest_distance = torch.amax(
-        torch.sqrt(torch.sum(x ** 2, dim=-1, keepdims=True)), dim=1, keepdims=True)
+        torch.sqrt(torch.sum(x ** 2, dim=-1, keepdims=True)), dim=1, keepdims=True
+    )
     x = x / furthest_distance
-    x = torch.stack([-x[:,:,0], x[:,:,1], -x[:,:,2]], dim=2) * 1.18
+    x = torch.stack([-x[:, :, 0], x[:, :, 1], -x[:, :, 2]], dim=2) * 1.18
     return x
+
 
 class ModelVanilla(object):
     def __init__(self, opts):
@@ -353,18 +184,19 @@ class ModelVanilla(object):
     def simple_gen(self, number=50, betas=None):
         x = self.sphere_generator(self.opts.bs)
         all_sample = []
+        zs = []
         n_batches = number // self.opts.bs + 1
         for _ in range(n_batches):
             with torch.no_grad():
-                z = self.noise_generator(bs=self.opts.bs)
+                z = self.noise_ator(bs=self.opts.bs)
                 out_pc = self.G(x, z)
-
+            zs.append(z)
             all_sample.append(out_pc)
 
         sample_pcs = torch.cat(all_sample, dim=0)[:number]
         sample_pcs = transform_chair_pc(sample_pcs).cpu().detach().numpy()
-
-        return sample_pcs
+        zs = torch.cat(zs, dim=0)[:number].cpu().detach().numpy()
+        return sample_pcs, zs
 
     def load(self, checkpoint_dir):
         if self.opts.pretrain_model_G is None:
@@ -436,7 +268,8 @@ class ModelComfort(object):
             betas = self.sample_betas(bs)
         betas = betas.cuda()
         z = z.cuda()
-        z = self.z_changer(betas, z)
+        z = self.z_changer(betas, z.squeeze(1))
+        z = z.unsqueeze(1)
         if return_betas:
             return z, betas
         else:
@@ -496,7 +329,7 @@ class ModelComfort(object):
 
         if self.ball is None:
             if static:
-                self.ball = np.loadtxt("template/balls/2048.xyz")[:, :3]
+                self.ball = np.loadtxt("template/balls/10000.xyz")[:, :3]
             else:
                 self.ball = np.loadtxt("template/balls/ball2.xyz")[:, :3]
             self.ball = pc_normalize(self.ball)
@@ -688,33 +521,28 @@ class ModelPose(object):
             print(" [*] Load SUCCESS")
         else:
             print(" [!] Load failed...")
-            exit(0)
-
-    def sample_pose(self, bs):
-        return get_pose_batch(bs)
-
-    def sample(self, zs):
-        x = self.sphere_generator(bs=len(zs))
-        z_cond, pose_pts, pose_vec = self.condition_z(zs, return_pose=True)
-        out_pc = self.G(x, z_cond)
-        sample_pcs = transform_chair_pc(out_pc).detach().numpy()
-        return sample_pcs, pose_vec
+            exit(0) 
 
     def condition_z(self, z, pose=None, return_pose=False):
         bs = len(z)
         if pose is None:
-            pose = self.sample_pose(bs)
-        true_pose, encoded_pose, pose_pcd = (
-            pose[0].cuda(),
-            pose[1].cuda(),
-            pose[2].cuda(),
-        )
-        z = z.cuda()
-        z = self.z_changer(encoded_pose, z)
+            sampled = get_pose_batch(bs)
+            true_pose, encoded_pose, pose_pcd = (
+                sampled[0].cuda(),
+                sampled[1].cuda(),
+                sampled[2].cuda(),
+            )
+        else:
+            encoded_pose = pose
+        
+        z = z.cuda() * (1 / self.opts.nv)
+        z = self.z_changer(encoded_pose, z.squeeze(1)).unsqueeze(1)
+        z = z * self.opts.nv
+
         if return_pose:
             return z, pose_pcd, true_pose
         else:
-            return z, pose_pcd
+            return z
 
     def build_model_eval(self):
         """Models"""
@@ -729,9 +557,8 @@ class ModelPose(object):
         for param in self.G.parameters():
             param.requires_grad = False
 
-        self.z_changer = MLP_FiLM(POSE_DIM, self.opts.nz)
+        self.z_changer = HyperNetwork(POSE_DIM, self.opts.nz)
         self.z_changer.cuda()
-
 
     def noise_generator(self, bs=1, masks=None):
 
@@ -807,39 +634,48 @@ class ModelPose(object):
             if not out_dir.exists():
                 out_dir.mkdir()
 
-            for i in range(10):
-                x = self.sphere_generator(bs=10)
+            n_batches = 100 // self.opts.bs
+
+            for i in range(n_batches):
+                x = self.sphere_generator(bs=self.opts.bs)
                 sex = "male" if i < 5 else "female"
-                z = self.noise_generator(bs=10)
+                z = self.noise_generator(bs=self.opts.bs)
                 z_cond, pose_pts, pose_vec = self.condition_z(z, return_pose=True)
                 out_pc = self.G(x, z_cond)
                 sample_pcs = transform_chair_pc(out_pc).cpu().detach().numpy()
-                for j in range(10):
+                for j in range(self.opts.bs):
                     torch.save(
                         {
                             "pose": pose_vec[j],
                             "pose_pts": pose_pts[j],
                             "pcd": sample_pcs[j],
                         },
-                        out_dir / f"{epoch}_{i * 10 + j}.pt",
+                        out_dir / f"{epoch}_{i * self.opts.bs + j}.pt",
                     )
-    
-        
 
-    def train_epoch(self, x, pose_loss_avg):
+    def train_epoch(self, x):
+        pose_loss_avg = AverageValueMeter()
         sample_pcs = None
         pose_pts = None
         for i in range(2000):
             z = self.noise_generator(bs=self.opts.bs)
+            
             z_cond, pose_pts, pose_vec = self.condition_z(z, return_pose=True)
+            if i == 0:
+                print("Input:", torch.mean(torch.var(z, axis=0)))
+                print("Output:", torch.mean(torch.var(z_cond, axis=0)))
+
             out_pc = self.G(x, z_cond)
             out_pc = transform_chair_pc(out_pc)
             pose_loss = get_pose_loss(out_pc, pose_pts, is_pcd=True) / self.opts.bs
             
             pose_loss_avg.update(pose_loss.detach())
-            loss = pose_loss
+            
+            l_p = -self.normal.log_prob(z_cond)[torch.abs(z_cond) > (3 * 0.2)].sum() / torch.numel(z_cond)
+            loss = pose_loss + l_p
             loss.backward()
             self.optim.step()
+            self.optim.zero_grad()
             sample_pcs = out_pc.cpu().detach().numpy()
         sample_pcs = sample_pcs[0]
         pose_pts = pose_pts[0]
@@ -848,31 +684,47 @@ class ModelPose(object):
             {
                 "pose": pose_pts,
                 "new_chair": sample_pcs,
-                "original_chair": original_chair
+                "original_chair": original_chair,
             },
-            'temp.pt',
+            "temp.pt",
         )
         print(f"Pose Loss: {pose_loss_avg.avg}")
+        return pose_loss_avg.avg
 
     def train(self, epochs=100):
-        x = self.sphere_generator(bs=self.opts.bs)
+        self.normal = torch.distributions.Normal(0.0, self.opts.nv, validate_args=False)
 
+        x = self.sphere_generator(bs=self.opts.bs)
         self.optim = optim.Adam(
-            self.z_changer.parameters(), lr=3e-6
+            self.z_changer.parameters(), lr=1e-4
         )  # , weight_decay=1e-3)
-        pose_loss_avg = AverageValueMeter()
+        
 
         print(f"Visualizing: Epoch 0")
-        self.visualize(SAVE_DIR, epoch)
-                
-        for epoch in tqdm(range(1, epochs+1)):
-            self.train_epoch(x, pose_loss_avg)
-            if epoch % 25 == 0:
-                print(f"Visualizing: Epoch {epoch}\tPose Loss: {pose_loss_avg.avg}")
+        self.visualize(SAVE_DIR / "pcd", 0)
+
+        for epoch in tqdm(range(1, epochs + 1)):
+            self.train_epoch(x)
+            if epoch % 10 == 0:
+                print(f"Visualizing: Epoch {epoch}")
                 self.visualize(SAVE_DIR / "pcd", epoch)
                 torch.save(
                     self.z_changer.state_dict(), SAVE_DIR / f"z_changer_{epoch}.pt"
                 )
+                
+    def generate_conditioned(self, poses):
+        out = []
+        for i in range(0, len(poses), self.opts.bs):
+            bs = min(len(poses) - i, self.opts.bs)
+            pose_batch = torch.as_tensor(encode_poses(np.asarray(poses[i:i+bs]))).cuda()
+            x = self.sphere_generator(bs=bs)
+            z = self.noise_generator(bs=bs)
+            z_cond = self.condition_z(z, pose=pose_batch, return_pose=False)
+            out_pc = self.G(x, z_cond)
+            out_pc = transform_chair_pc(out_pc)
+            out.append(out_pc)
+        return torch.cat(out).cpu().detach().numpy()
+        
 
     def load(self, checkpoint_dir):
         if self.opts.pretrain_model_G is None:

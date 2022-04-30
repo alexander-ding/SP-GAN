@@ -1,29 +1,36 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 _*-
-from Generation.config import opts
-from Generation.model_test import ModelVanilla
-from datetime import datetime
-import os
-import pprint
-import torch
-import numpy as np
 from pathlib import Path
-pp = pprint.PrettyPrinter()
 
-# used on Feb 9 to generate 10,000 pointclouds
-if __name__ == '__main__':
+import numpy as np
 
-    opts.pretrain_model_G = "Chair_G.pth"
-    opts.log_dir = "models"
+from Generation.config import parser
+from Generation.model_test import ModelVanilla
 
-    model = ModelVanilla(opts)
-    pcd = model.simple_gen(10000)
-    
+parser.add_argument("-n", type=int)
+parser.add_argument("-o", type=str)
+
+
+def main(args):
+    args.pretrain_model_G = "Chair_G.pth"
+    args.log_dir = "models"
+
+    model = ModelVanilla(args)
+    pcd, zs = model.simple_gen(args.n)
+
     print(np.mean(np.min(pcd, axis=1), axis=0))
     print(np.mean(np.max(pcd, axis=1), axis=0))
     print(np.mean(np.prod(np.max(pcd, axis=1) - np.min(pcd, axis=1), axis=1)))
-    
-    OUT_DIR = Path('/mnt/hdd1/chairs/pcd')
-    for i in range(10000):
-        np.save(OUT_DIR / f'{i}.npy', pcd[i])
-        
+
+    OUT_DIR = Path(args.o)
+    (OUT_DIR / "pcd").mkdir(exist_ok=True, parents=True)
+    (OUT_DIR / "z").mkdir(exist_ok=True, parents=True)
+    for i in range(args.n):
+        np.save(OUT_DIR / "pcd" / f"{i}.npy", pcd[i])
+        np.save(OUT_DIR / "z" / f"{i}.npy", zs[i])
+
+
+# used on Feb 9 to generate 10,000 pointclouds
+if __name__ == "__main__":
+    args = parser.parse_args()
+    main(args)
