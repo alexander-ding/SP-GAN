@@ -14,7 +14,6 @@ from pprint import pprint
 
 import joblib
 import numpy as np
-import open3d as o3d
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
