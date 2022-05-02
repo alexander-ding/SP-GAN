@@ -187,7 +187,7 @@ class ModelVanilla(object):
         n_batches = number // self.opts.bs + 1
         for _ in range(n_batches):
             with torch.no_grad():
-                z = self.noise_ator(bs=self.opts.bs)
+                z = self.noise_generator(bs=self.opts.bs)
                 out_pc = self.G(x, z)
             zs.append(z)
             all_sample.append(out_pc)
