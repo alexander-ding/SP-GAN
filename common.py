@@ -1,5 +1,3 @@
-import open3d as o3d
-
 import torch
 import joblib
 import numpy as np
