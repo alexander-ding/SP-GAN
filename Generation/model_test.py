@@ -71,9 +71,10 @@ def transform_chair_pc(x):
     x = x.transpose(2, 1)
     centroid = torch.mean(x, dim=1, keepdims=True)
     x = x - centroid
-    furthest_distance = torch.amax(
+    furthest_distance, _ = torch.max(
         torch.sqrt(torch.sum(x ** 2, dim=-1, keepdims=True)), dim=1, keepdims=True
     )
+    print(furthest_distance)
     x = x / furthest_distance
     x = torch.stack([-x[:, :, 0], x[:, :, 1], -x[:, :, 2]], dim=2) * 1.18
     return x
