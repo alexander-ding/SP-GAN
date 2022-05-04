@@ -1,11 +1,11 @@
-import open3d as o3d
-
-import torch
-import joblib
-import numpy as np
+import glob
 import gzip
 from pathlib import Path
-import glob
+
+import joblib
+import numpy as np
+import open3d as o3d
+import torch
 
 CUBOID = "CUBOID"
 IM = "IM"
@@ -71,12 +71,30 @@ elif model_type == IM:
 elif model_type == SPGAN:
     files = [DATA_DIR / "poses" / f"{i}.pt" for i in range(10000)]
 
+def sample_betas(batch_size=1, is_default=False, return_z=False):
+    if is_default:
+        return default.repeat(batch_size, 1)
+    z = torch.randn((batch_size, b_std.shape[-1]))
+    betas = (b_mean + z * b_std).to(device)
+    z = z.to(device)
+    sex = torch.zeros((batch_size, 2)).to(device)
+    sex[np.arange(batch_size), np.random.randint(0, 2, batch_size)] = 1.0
+    z = torch.cat((z, sex), dim=-1)
+    betas = torch.cat((betas, sex), dim=-1)
+    
+    if return_z:
+        return betas, z
+    else:
+        return betas
+
 def encode_betas(betas):
     betas[:,:16] = (betas[:,:16] - b_mean.to(device)) / b_std.to(device)
     return betas
 def decode_betas(betas):
     betas[:,:16] = betas[:,:16] * b_std.to(device) + b_mean.to(device)
     return betas
+
+BETAS_DIM = 18
 
 clustering, clustering_inv = torch.load("clustered_poses.pt")
 pca = joblib.load("pose_pca.joblib")

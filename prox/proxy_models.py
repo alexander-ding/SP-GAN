@@ -38,63 +38,57 @@ def sample_mesh_surface(v, f, n_s=10000):
 
 
 class LossProxy(nn.Module):
-    def __init__(self, mean=0.0, std=1.0):
+    def __init__(self):
         super(LossProxy, self).__init__()
 
-        reshape_sz = 256
-
-        hsz0 = reshape_sz // 2
-        hsz1 = reshape_sz // 4
-        hsz2 = reshape_sz // 8
-
+        reshape_sz = 1024
         dropout = 0.2
 
-        self.encoder = pc_encoder.HyperNetwork(beta_sz=16 + 2)
+        self.encoder = pc_encoder.PCEncoder(beta_sz=16+2)
 
-        self.linear1 = nn.Linear(reshape_sz, 1)
+        linear1 = pc_encoder.FeedForward(1024,256,1,['leaky_relu']*2+['linear'])
+        
+        self.loss_network = nn.Sequential(
+            linear1,
+            nn.Flatten(0)
+        )
 
-        self.loss_network = nn.Sequential(self.linear1, nn.Flatten(0))
+    def predict(self,inputs,betas):
 
-        self.mean = mean
-        self.std = std
+        encoding = self.encoder(inputs,betas)
+        output = self.loss_network(encoding)
+        return output
 
-    def predict(self, inputs, betas):
-
-        encoding = self.encoder(inputs, betas)
-        return self.loss_network(encoding)
-
-    def forward(self, chairs, betas, is_pcd):
-
+    def forward(self,chairs,betas,is_pcd):
+        
         pts_chair = []
         if not is_pcd:
             for chair in chairs:
-                v, f = get_vf(chair)
-                p = sample_mesh_surface(v.unsqueeze(0), f).squeeze(0)
+                v,f = get_vf(chair)
+                p = sample_mesh_surface(v.unsqueeze(0),f).squeeze(0)
                 pts_chair.append(p)
             chairs = torch.stack(pts_chair)
 
-        return self.predict(chairs, betas).flatten()
+        return self.predict(chairs,betas).flatten()
 
-    def loss(self, pred, labels):
+    def loss(self,pred,labels):
 
-        labels = (labels - self.mean) / self.std
-        loss = 0.0
+        loss = 0.
         loss += (pred - labels).abs().sum()
 
         return loss
 
-    def contrastive(self, pred, labels):
+    def contrastive(self,pred,labels):
 
-        labels = (labels - self.mean) / self.std
-        num_choices = max(len(pred), 5000)
-        choices = np.random.choice(len(pred), (2 * num_choices))
+        num_choices = max(len(pred),5000)
+        choices = np.random.choice(len(pred),(2*num_choices))
 
-        p1, p2 = pred[choices].view(2, -1)
-        t1, t2 = labels[choices].view(2, -1)
+        p1,p2 = pred[choices].view(2,-1)
+        t1,t2 = labels[choices].view(2,-1)
 
         truth = t1 < t2
         p_comp = (p1 < p2) == truth
-
+            
         return p_comp.float().mean()
 
 
@@ -191,6 +185,15 @@ class PoseProxy(nn.Module):
 #     return loss_model(inputs, betas, is_pcd).sum()
 
 
+loss_model = LossProxy().to(device)
+loss_model.load_state_dict(torch.load("comfort_dict_cluster_mesh.pt"))
+for parameter in loss_model.parameters():
+    parameter.requires_grad = False
+loss_model.eval()
+    
+def get_comfort_loss(cubes,betas,is_pcd=False):
+    return loss_model(cubes,betas,is_pcd).sum()
+
 pose_model = PoseProxy().to(device)
 pose_model.load_state_dict(torch.load("pose_dict_cluster_mesh.pt"))
 for parameter in pose_model.parameters():
@@ -200,3 +203,4 @@ pose_model.eval()
 
 def get_pose_loss(chairs, pose, is_pcd=False):
     return pose_model(chairs, pose, is_pcd).sum()
+

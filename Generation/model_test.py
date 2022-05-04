@@ -20,9 +20,9 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from common import POSE_DIM, get_pose_batch, encode_poses
+from common import POSE_DIM, get_pose_batch, encode_poses, sample_betas, encode_betas, BETAS_DIM
 from pc_encoder import HyperNetwork
-from prox.proxy_models import get_pose_loss
+from prox.proxy_models import get_comfort_loss, get_pose_loss
 from tensorboardX import SummaryWriter
 from torch.autograd import Variable
 from tqdm import tqdm
@@ -54,7 +54,8 @@ class AverageValueMeter(object):
         self.avg = self.sum / self.count
 
 
-SAVE_DIR = Path("/mnt/hdd1/chairs/spgan-pose/")
+SAVE_DIR_POSE = Path("/mnt/hdd1/chairs/spgan-pose/")
+SAVE_DIR_COMFORT = Path("/mnt/hdd1/chairs/spgan-comfort/")
 
 
 def pc_normalize(pc, return_len=False):
@@ -241,35 +242,18 @@ class ModelComfort(object):
             print(" [*] Load SUCCESS")
         else:
             print(" [!] Load failed...")
-            exit(0)
-
-    def sample(self, zs):
-        x = self.sphere_generator(bs=len(zs))
-        betas = self.sample_betas(bs=len(zs))
-        z_cond = self.condition_z(zs, betas=betas)
-        out_pc = self.G(x, z_cond)
-        sample_pcs = transform_chair_pc(out_pc)
-        return sample_pcs, betas
-
-    def sample_betas(self, bs, sex=None):
-        sex_dict = {"male": 0, "female": 1}
-        sex = np.random.randint(0, 2, size=bs) if sex is None else sex_dict[sex]
-        s_oh = torch.zeros(bs, 2)
-        s_oh[np.arange(bs), sex] = 1.0
-        betas = (
-            torch.randn((bs, self.betas_mean.size()[-1])) * self.betas_std
-            + self.betas_mean
-        ).float()
-        return torch.cat((betas, s_oh), dim=1)
+            exit(0) 
 
     def condition_z(self, z, betas=None, return_betas=False):
         bs = len(z)
         if betas is None:
-            betas = self.sample_betas(bs)
-        betas = betas.cuda()
-        z = z.cuda()
-        z = self.z_changer(betas, z.squeeze(1))
-        z = z.unsqueeze(1)
+            _, betas = sample_betas(bs, return_z=True)
+            betas = betas.cuda()
+        
+        z = z.cuda() * (1 / self.opts.nv)
+        z = self.z_changer(betas, z.squeeze(1)).unsqueeze(1)
+        z = z * self.opts.nv
+
         if return_betas:
             return z, betas
         else:
@@ -288,7 +272,7 @@ class ModelComfort(object):
         for param in self.G.parameters():
             param.requires_grad = False
 
-        self.z_changer = MLP_FiLM(18, self.opts.nz)
+        self.z_changer = HyperNetwork(BETAS_DIM, self.opts.nz)
         self.z_changer.cuda()
 
     def noise_generator(self, bs=1, masks=None):
@@ -300,9 +284,6 @@ class ModelComfort(object):
                 )
             else:
                 noise = np.random.normal(0, self.opts.nv, (bs, 1, self.opts.nz))
-                # scale = self.opts.nv
-                # w = np.random.uniform(low=-scale, high=scale, size=(bs, 1, self.opts.nz))
-                noise = np.tile(noise, (1, self.opts.np, 1))
 
             if self.opts.n_mix and random.random() < 0.8:
                 noise2 = np.random.normal(0, self.opts.nv, (bs, self.opts.nz))
@@ -329,7 +310,7 @@ class ModelComfort(object):
 
         if self.ball is None:
             if static:
-                self.ball = np.loadtxt("template/balls/10000.xyz")[:, :3]
+                self.ball = np.loadtxt("template/balls/2048.xyz")[:, :3]
             else:
                 self.ball = np.loadtxt("template/balls/ball2.xyz")[:, :3]
             self.ball = pc_normalize(self.ball)
@@ -363,106 +344,89 @@ class ModelComfort(object):
 
         return ball
 
-    def simple_gen(self, number=50, betas=None):
-        x = self.sphere_generator(self.opts.bs)
-        all_sample = []
-        n_batches = number // self.opts.bs + 1
-        for _ in range(n_batches):
-            with torch.no_grad():
-                z = self.noise_generator(bs=self.opts.bs)
-                z_cond = self.condition_z(z, betas=betas)
-                out_pc = self.G(x, z_cond)
-
-            all_sample.append(out_pc)
-
-        sample_pcs = torch.cat(all_sample, dim=0)[:number]
-        sample_pcs = transform_chair_pc(sample_pcs).detach().numpy()
-
-        return sample_pcs
-
-    def visualize(self, out_dir):
+    def visualize(self, out_dir, epoch):
         with torch.no_grad():
             if not out_dir.exists():
                 out_dir.mkdir()
 
-            for i in range(10):
-                x = self.sphere_generator(bs=10)
+            n_batches = 100 // self.opts.bs
+
+            for i in range(n_batches):
+                x = self.sphere_generator(bs=self.opts.bs)
                 sex = "male" if i < 5 else "female"
-                betas = self.sample_betas(10, sex=sex)
-                zs = self.noise_generator(bs=10)
-                z_cond = self.condition_z(zs, betas=betas)
+                z = self.noise_generator(bs=self.opts.bs)
+                z_cond, pose_pts, pose_vec = self.condition_z(z, return_pose=True)
                 out_pc = self.G(x, z_cond)
                 sample_pcs = transform_chair_pc(out_pc).cpu().detach().numpy()
-                for j in range(10):
+                for j in range(self.opts.bs):
                     torch.save(
                         {
-                            "betas": betas[j],
+                            "pose": pose_vec[j],
+                            "pose_pts": pose_pts[j],
                             "pcd": sample_pcs[j],
                         },
-                        out_dir / f"{i * 10 + j}.pt",
+                        out_dir / f"{epoch}_{i * self.opts.bs + j}.pt",
                     )
 
-    def train(self, epochs=100):
-        writer = SummaryWriter(logdir=SAVE_DIR / "z_changer")
-
-        self.optim = optim.Adam(self.z_changer.parameters(), lr=1e-5)
-        c_disc_loss = 10.0
-        x = self.sphere_generator(bs=self.opts.bs)
-
+    def train_epoch(self, x):
         comfort_loss_avg = AverageValueMeter()
-        disc_loss_avg = AverageValueMeter()
-        gen_loss_avg = AverageValueMeter()
+        for i in range(2000):
+            z = self.noise_generator(bs=self.opts.bs)
+            
+            z_cond, betas = self.condition_z(z, return_betas=True)
+            if i == 0:
+                print("Input:", torch.mean(torch.var(z, axis=0)))
+                print("Output:", torch.mean(torch.var(z_cond, axis=0)))
+
+            out_pc = self.G(x, z_cond)
+            out_pc = transform_chair_pc(out_pc)
+            comfort_loss = get_comfort_loss(out_pc, betas, is_pcd=True) / self.opts.bs
+            
+            comfort_loss_avg.update(comfort_loss.detach())
+            
+            l_p = -self.normal.log_prob(z_cond)[torch.abs(z_cond) > (3 * 0.2)].sum() / torch.numel(z_cond)
+            loss = comfort_loss + l_p
+            loss.backward()
+            self.optim.step()
+            self.optim.zero_grad()
+
+        print(f"Comfort Loss: {comfort_loss_avg.avg}")
+        return comfort_loss_avg.avg
+
+    def train(self, epochs=100):
+        self.normal = torch.distributions.Normal(0.0, self.opts.nv, validate_args=False)
+
+        x = self.sphere_generator(bs=self.opts.bs)
+        self.optim = optim.Adam(
+            self.z_changer.parameters(), lr=1e-4
+        )  # , weight_decay=1e-3)
+        
+
+        print(f"Visualizing: Epoch 0")
+        self.visualize(SAVE_DIR_COMFORT / "pcd", 0)
 
         for epoch in tqdm(range(1, epochs + 1)):
-            for i in range(1000):
-                criterion = nn.BCELoss()
-
-                z = self.noise_generator(bs=self.opts.bs)
-                z_cond, betas = self.condition_z(z, return_betas=True)
-                p_gen = self.discriminator(z_cond[:, 0, :])
-                gen_loss = criterion(p_gen, torch.zeros_like(p_gen))
-                gen_loss *= c_disc_loss
-
-                out_pc = self.G(x, z_cond)
-                out_pc = transform_chair_pc(out_pc)
-                comfort_loss = get_comfort_loss(out_pc, betas, is_pcd=True)
-
-                c_loss = 0.0
-                c_loss += comfort_loss
-                c_loss += gen_loss
-
-                self.comf_optim.zero_grad()
-                c_loss.backward()
-                self.comf_optim.step()
-                comfort_loss_avg.update(comfort_loss.detach().cpu().numpy())
-                gen_loss_avg.update(gen_loss.detach().cpu().numpy())
-
-                z = self.noise_generator(bs=self.opts.bs)
-                z_cond, betas = self.condition_z(z, return_betas=True)
-                p_gen = self.discriminator(z_cond[:, 0, :])
-                p_real = self.discriminator(z[:, 0, :])
-                disc_loss = criterion(p_gen, torch.ones_like(p_gen)) + criterion(
-                    p_real, torch.zeros_like(p_gen)
-                )
-                disc_loss *= c_disc_loss
-
-                d_loss = 0.0
-                d_loss += disc_loss
-
-                self.disc_optim.zero_grad()
-                d_loss.backward()
-                self.disc_optim.step()
-                disc_loss_avg.update(d_loss.detach().cpu().numpy())
-
-            print(
-                f"Comfort Loss: {comfort_loss_avg.avg:.3f} Gen Loss: {gen_loss_avg.avg:.3f} Discriminator Loss: {disc_loss_avg.avg:.3f}"
-            )
-            if epoch % 25 == 0:
+            self.train_epoch(x)
+            if epoch % 10 == 0:
                 print(f"Visualizing: Epoch {epoch}")
-                self.visualize(SAVE_DIR / f"{epoch}")
+                self.visualize(SAVE_DIR_COMFORT / "pcd", epoch)
                 torch.save(
-                    self.z_changer.state_dict(), SAVE_DIR / f"z_changer_{epoch}.pt"
+                    self.z_changer.state_dict(), SAVE_DIR_COMFORT / f"z_changer_{epoch}.pt"
                 )
+                
+    def generate_conditioned(self, betas):
+        out = []
+        for i in range(0, len(betas), self.opts.bs):
+            bs = min(len(betas) - i, self.opts.bs)
+            betas_batch = torch.as_tensor(encode_betas(np.asarray(betas[i:i+bs]))).cuda()
+            x = self.sphere_generator(bs=bs)
+            z = self.noise_generator(bs=bs)
+            z_cond = self.condition_z(z, betas=betas_batch, return_betas=False)
+            out_pc = self.G(x, z_cond)
+            out_pc = transform_chair_pc(out_pc)
+            out.append(out_pc)
+        return torch.cat(out).cpu().detach().numpy()
+        
 
     def load(self, checkpoint_dir):
         if self.opts.pretrain_model_G is None:
@@ -493,8 +457,8 @@ class ModelComfort(object):
         if not self.opts.pretrain_model_z is None:
             resume_file_z = os.path.join(checkpoint_dir, self.opts.pretrain_model_z)
             flag_z = os.path.isfile(resume_file_z)
-            if flag_z == False:
-                print("Z--> Error: no checkpoint directory found!")
+            if flag_G == False:
+                print("G--> Error: no checkpoint directory found!")
                 exit()
             else:
                 print("resume_file_z------>: {}".format(resume_file_z))
@@ -701,15 +665,15 @@ class ModelPose(object):
         
 
         print(f"Visualizing: Epoch 0")
-        self.visualize(SAVE_DIR / "pcd", 0)
+        self.visualize(SAVE_DIR_POSE / "pcd", 0)
 
         for epoch in tqdm(range(1, epochs + 1)):
             self.train_epoch(x)
             if epoch % 10 == 0:
                 print(f"Visualizing: Epoch {epoch}")
-                self.visualize(SAVE_DIR / "pcd", epoch)
+                self.visualize(SAVE_DIR_POSE / "pcd", epoch)
                 torch.save(
-                    self.z_changer.state_dict(), SAVE_DIR / f"z_changer_{epoch}.pt"
+                    self.z_changer.state_dict(), SAVE_DIR_POSE / f"z_changer_{epoch}.pt"
                 )
                 
     def generate_conditioned(self, poses):
