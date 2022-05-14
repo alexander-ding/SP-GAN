@@ -159,7 +159,7 @@ class Generator(nn.Module):
         self.lrelu2 = nn.LeakyReLU(neg_2)
 
     def forward(self, x, z):
-        z = torch.tile(z, (1, self.opts.np, 1))
+        z = z.repeat(1, self.opts.np, 1)
         B, N, _ = x.size()
         if self.opts.z_norm:
             z = z / (z.norm(p=2, dim=-1, keepdim=True)+1e-8)
