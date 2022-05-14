@@ -18,5 +18,5 @@ if __name__ == '__main__':
     opts.np = 2048
     opts.bs = 10
 
-    model = ModelPose(opts)
-    model.train()
+    model = ModelComfort(opts)
+    model.train(start_epoch=100, end_epoch=200)

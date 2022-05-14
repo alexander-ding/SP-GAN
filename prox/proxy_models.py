@@ -186,7 +186,7 @@ class PoseProxy(nn.Module):
 
 
 loss_model = LossProxy().to(device)
-loss_model.load_state_dict(torch.load("comfort_dict_cluster_mesh.pt"))
+loss_model.load_state_dict(torch.load("comf_dict_cluster_mesh.pt"))
 for parameter in loss_model.parameters():
     parameter.requires_grad = False
 loss_model.eval()

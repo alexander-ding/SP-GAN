@@ -189,7 +189,7 @@ class ModelVanilla(object):
         n_batches = number // self.opts.bs + 1
         for _ in range(n_batches):
             with torch.no_grad():
-                z = self.noise_ator(bs=self.opts.bs)
+                z = self.noise_generator(bs=self.opts.bs)
                 out_pc = self.G(x, z)
             zs.append(z)
             all_sample.append(out_pc)
@@ -248,8 +248,7 @@ class ModelComfort(object):
         bs = len(z)
         if betas is None:
             _, betas = sample_betas(bs, return_z=True)
-            betas = betas.cuda()
-        
+
         z = z.cuda() * (1 / self.opts.nv)
         z = self.z_changer(betas, z.squeeze(1)).unsqueeze(1)
         z = z * self.opts.nv
@@ -346,23 +345,21 @@ class ModelComfort(object):
 
     def visualize(self, out_dir, epoch):
         with torch.no_grad():
-            if not out_dir.exists():
-                out_dir.mkdir()
+            out_dir.mkdir(parents=True, exist_ok=True)
 
             n_batches = 100 // self.opts.bs
 
             for i in range(n_batches):
                 x = self.sphere_generator(bs=self.opts.bs)
-                sex = "male" if i < 5 else "female"
                 z = self.noise_generator(bs=self.opts.bs)
-                z_cond, pose_pts, pose_vec = self.condition_z(z, return_pose=True)
+            
+                z_cond, betas = self.condition_z(z, return_betas=True)
                 out_pc = self.G(x, z_cond)
                 sample_pcs = transform_chair_pc(out_pc).cpu().detach().numpy()
                 for j in range(self.opts.bs):
                     torch.save(
                         {
-                            "pose": pose_vec[j],
-                            "pose_pts": pose_pts[j],
+                            "betas": betas[j],
                             "pcd": sample_pcs[j],
                         },
                         out_dir / f"{epoch}_{i * self.opts.bs + j}.pt",
@@ -370,7 +367,7 @@ class ModelComfort(object):
 
     def train_epoch(self, x):
         comfort_loss_avg = AverageValueMeter()
-        for i in range(2000):
+        for i in range(4000):
             z = self.noise_generator(bs=self.opts.bs)
             
             z_cond, betas = self.condition_z(z, return_betas=True)
@@ -393,7 +390,7 @@ class ModelComfort(object):
         print(f"Comfort Loss: {comfort_loss_avg.avg}")
         return comfort_loss_avg.avg
 
-    def train(self, epochs=100):
+    def train(self, start_epoch=0, end_epoch=100):
         self.normal = torch.distributions.Normal(0.0, self.opts.nv, validate_args=False)
 
         x = self.sphere_generator(bs=self.opts.bs)
@@ -402,14 +399,15 @@ class ModelComfort(object):
         )  # , weight_decay=1e-3)
         
 
-        print(f"Visualizing: Epoch 0")
-        self.visualize(SAVE_DIR_COMFORT / "pcd", 0)
-
-        for epoch in tqdm(range(1, epochs + 1)):
+        if start_epoch == 0:
+            print(f"Visualizing: Epoch 0")
+            self.visualize(SAVE_DIR_COMFORT / "raw", 0)
+        
+        for epoch in tqdm(range(start_epoch+1, end_epoch+1)):
             self.train_epoch(x)
             if epoch % 10 == 0:
                 print(f"Visualizing: Epoch {epoch}")
-                self.visualize(SAVE_DIR_COMFORT / "pcd", epoch)
+                self.visualize(SAVE_DIR_COMFORT / "raw", epoch)
                 torch.save(
                     self.z_changer.state_dict(), SAVE_DIR_COMFORT / f"z_changer_{epoch}.pt"
                 )
@@ -595,8 +593,7 @@ class ModelPose(object):
 
     def visualize(self, out_dir, epoch):
         with torch.no_grad():
-            if not out_dir.exists():
-                out_dir.mkdir()
+            out_dir.mkdir(parents=True, exist_ok=True)
 
             n_batches = 100 // self.opts.bs
 
@@ -665,13 +662,13 @@ class ModelPose(object):
         
 
         print(f"Visualizing: Epoch 0")
-        self.visualize(SAVE_DIR_POSE / "pcd", 0)
+        self.visualize(SAVE_DIR_POSE / "raw", 0)
 
         for epoch in tqdm(range(1, epochs + 1)):
             self.train_epoch(x)
             if epoch % 10 == 0:
                 print(f"Visualizing: Epoch {epoch}")
-                self.visualize(SAVE_DIR_POSE / "pcd", epoch)
+                self.visualize(SAVE_DIR_POSE / "raw", epoch)
                 torch.save(
                     self.z_changer.state_dict(), SAVE_DIR_POSE / f"z_changer_{epoch}.pt"
                 )

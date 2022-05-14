@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import etw_pytorch_utils as pt_utils
 from pointnet2_ops_lib.pointnet2_ops.pointnet2_modules import PointnetSAModule
-from common import encode_betas
 device = torch.device('cuda')
 
 class PCEncoder(nn.Module):
@@ -74,6 +73,7 @@ class PCEncoder(nn.Module):
         )
 
     def forward(self, pointcloud, betas):
+        # note: pass in encoded betas
         # type: (Pointnet2SSG, torch.cuda.FloatTensor) -> pt_utils.Seq
         """
             Forward pass of the network
@@ -86,7 +86,6 @@ class PCEncoder(nn.Module):
                 be formated as (x, y, z, features...)
         """
         xyz = pointcloud.contiguous()
-        betas = encode_betas(betas)
         features = pointcloud.transpose(1, 2).contiguous()
         
         for i in range(len(self.SA_modules)):
