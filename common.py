@@ -74,10 +74,10 @@ elif model_type == SPGAN:
 def sample_betas(batch_size=1, is_default=False, return_z=False):
     if is_default:
         return default.repeat(batch_size, 1)
-    z = torch.randn((batch_size, b_std.shape[-1]))
-    betas = (b_mean + z * b_std).to(device)
+    z = torch.randn((batch_size, b_std.shape[-1])).float()
+    betas = (b_mean + z * b_std).to(device).float()
     z = z.to(device)
-    sex = torch.zeros((batch_size, 2)).to(device)
+    sex = torch.zeros((batch_size, 2)).to(device).float()
     sex[np.arange(batch_size), np.random.randint(0, 2, batch_size)] = 1.0
     z = torch.cat((z, sex), dim=-1)
     betas = torch.cat((betas, sex), dim=-1)

@@ -18,7 +18,7 @@ def main(args):
     model = ModelComfort(args)
     
     beta_files = sorted(Path(args.i).glob('*.pt'), key=lambda p: int(p.stem))
-    betas = torch.stack([torch.load(f) for f in beta_files])
+    betas = torch.stack([torch.load(f) for f in beta_files]).cpu()
     
     sex = torch.zeros((len(betas), 2))
     sex[:, 0 if args.s == 'male' else 1] = 1.0
